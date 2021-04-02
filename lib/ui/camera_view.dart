@@ -1,6 +1,3 @@
-import 'dart:io';
-import 'dart:isolate';
-
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:object_detection/tflite/classifier.dart';
@@ -39,27 +36,33 @@ class _CameraViewState extends State<CameraView> with WidgetsBindingObserver {
   /// Instance of [IsolateUtils]
   IsolateUtils isolateUtils;
 
+  int uiThreadTimeStart;
+
   @override
   void initState() {
     super.initState();
+    initStateAsync();
+  }
+
+  Future<void> initStateAsync() async {
     WidgetsBinding.instance.addObserver(this);
-
-    // Camera initialization
-    initializeCamera();
-
-    // Create an instance of classifier to load model and labels
-    classifier = Classifier();
 
     // Initially predicting = false
     predicting = false;
 
+    // Create an instance of classifier to load model and labels
+    classifier = Classifier();
+
     // Spawn a new isolate
     isolateUtils = IsolateUtils();
-    isolateUtils.start();
+    await isolateUtils.start(processInferenceResults);
+
+    // Camera initialization
+    await initializeCamera();
   }
 
   /// Initializes the camera by setting [cameraController]
-  void initializeCamera() async {
+  Future<void> initializeCamera() async {
     cameras = await availableCameras();
 
     // cameras[0] for rear-camera
@@ -110,7 +113,7 @@ class _CameraViewState extends State<CameraView> with WidgetsBindingObserver {
         predicting = true;
       });
 
-      var uiThreadTimeStart = DateTime.now().millisecondsSinceEpoch;
+      uiThreadTimeStart = DateTime.now().millisecondsSinceEpoch;
 
       // Data to be passed to inference isolate
       var isolateData = IsolateData(
@@ -119,34 +122,26 @@ class _CameraViewState extends State<CameraView> with WidgetsBindingObserver {
       // We could have simply used the compute method as well however
       // it would be as in-efficient as we need to continuously passing data
       // to another isolate.
-
-      /// perform inference in separate isolate
-      Map<String, dynamic> inferenceResults = await inference(isolateData);
-
-      var uiThreadInferenceElapsedTime =
-          DateTime.now().millisecondsSinceEpoch - uiThreadTimeStart;
-
-      // pass results to HomeView
-      widget.resultsCallback(inferenceResults["recognitions"]);
-
-      // pass stats to HomeView
-      widget.statsCallback((inferenceResults["stats"] as Stats)
-        ..totalElapsedTime = uiThreadInferenceElapsedTime);
-
-      // set predicting to false to allow new frames
-      setState(() {
-        predicting = false;
-      });
+      isolateUtils.process(isolateData);
     }
   }
 
-  /// Runs inference in another isolate
-  Future<Map<String, dynamic>> inference(IsolateData isolateData) async {
-    ReceivePort responsePort = ReceivePort();
-    isolateUtils.sendPort
-        .send(isolateData..responsePort = responsePort.sendPort);
-    var results = await responsePort.first;
-    return results;
+  Future<void> processInferenceResults(
+      Map<String, dynamic> inferenceResults) async {
+    var uiThreadInferenceElapsedTime =
+        DateTime.now().millisecondsSinceEpoch - uiThreadTimeStart;
+
+    // pass results to HomeView
+    widget.resultsCallback(inferenceResults["recognitions"]);
+
+    // pass stats to HomeView
+    widget.statsCallback((inferenceResults["stats"] as Stats)
+      ..totalElapsedTime = uiThreadInferenceElapsedTime);
+
+    // set predicting to false to allow new frames
+    setState(() {
+      predicting = false;
+    });
   }
 
   @override

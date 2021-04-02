@@ -5,47 +5,44 @@ import 'package:camera/camera.dart';
 import 'package:image/image.dart' as imageLib;
 import 'package:object_detection/tflite/classifier.dart';
 import 'package:object_detection/utils/image_utils.dart';
+import 'package:stream_channel/isolate_channel.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 
 /// Manages separate Isolate instance for inference
 class IsolateUtils {
   static const String DEBUG_NAME = "InferenceIsolate";
 
-  Isolate _isolate;
-  ReceivePort _receivePort = ReceivePort();
-  SendPort _sendPort;
+  IsolateChannel channel;
 
-  SendPort get sendPort => _sendPort;
-
-  void start() async {
-    _isolate = await Isolate.spawn<SendPort>(
-      entryPoint,
-      _receivePort.sendPort,
-      debugName: DEBUG_NAME,
-    );
-
-    _sendPort = await _receivePort.first;
+  Future<void> start(Function processResults) async {
+    final receivePort = new ReceivePort();
+    channel = new IsolateChannel.connectReceive(receivePort);
+    channel.stream.listen((data) {
+      processResults(data);
+    });
+    await Isolate.spawn(_entryPoint, receivePort.sendPort);
   }
 
-  static void entryPoint(SendPort sendPort) async {
-    final port = ReceivePort();
-    sendPort.send(port.sendPort);
+  void process(IsolateData isolateData) {
+    channel.sink.add(isolateData);
+  }
 
-    await for (final IsolateData isolateData in port) {
-      if (isolateData != null) {
-        Classifier classifier = Classifier(
-            interpreter:
-                Interpreter.fromAddress(isolateData.interpreterAddress),
-            labels: isolateData.labels);
-        imageLib.Image image =
-            ImageUtils.convertCameraImage(isolateData.cameraImage);
-        if (Platform.isAndroid) {
-          image = imageLib.copyRotate(image, 90);
-        }
-        Map<String, dynamic> results = classifier.predict(image);
-        isolateData.responsePort.send(results);
+  static void _entryPoint(SendPort sendPort) {
+    IsolateChannel channel = new IsolateChannel.connectSend(sendPort);
+    channel.stream.listen((data) {
+      IsolateData isolateData = data;
+      Classifier classifier = Classifier(
+        interpreter: Interpreter.fromAddress(isolateData.interpreterAddress),
+        labels: isolateData.labels,
+      );
+      imageLib.Image image =
+          ImageUtils.convertCameraImage(isolateData.cameraImage);
+      if (Platform.isAndroid) {
+        image = imageLib.copyRotate(image, 90);
       }
-    }
+      final results = classifier.predict(image);
+      channel.sink.add(results);
+    });
   }
 }
 
@@ -54,7 +51,6 @@ class IsolateData {
   CameraImage cameraImage;
   int interpreterAddress;
   List<String> labels;
-  SendPort responsePort;
 
   IsolateData(
     this.cameraImage,
